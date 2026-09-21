@@ -1,0 +1,15 @@
+[Unit]
+Description=WhisperLoom -> Hermes Bridge (Sprachauftraege)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/chris/hermes-bridge
+EnvironmentFile=/home/chris/hermes-bridge/.env
+ExecStart=/home/chris/hermes-bridge/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8093
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
