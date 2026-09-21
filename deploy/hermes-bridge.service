@@ -1,15 +1,17 @@
 [Unit]
-Description=WhisperLoom -> Hermes Bridge (Sprachauftraege)
-After=network-online.target
-Wants=network-online.target
+Description=hermes-bridge — Sprachauftraege von WhisperLoom an Hermes (FastAPI/uvicorn)
+After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/chris/hermes-bridge
-EnvironmentFile=/home/chris/hermes-bridge/.env
+# Fuehrendes "-": der Dienst startet auch ohne .env. Er ist dann fail-closed —
+# ohne BRIDGE_TOKEN beantwortet er jeden Auftrag mit 401, /health meldet
+# "configured": false. So laesst sich die Route aufbauen, bevor das Token da ist.
+EnvironmentFile=-/home/chris/hermes-bridge/.env
 ExecStart=/home/chris/hermes-bridge/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8093
 Restart=on-failure
-RestartSec=5
+RestartSec=3
 
 [Install]
 WantedBy=default.target
