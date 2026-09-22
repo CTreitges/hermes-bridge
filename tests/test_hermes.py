@@ -4,6 +4,7 @@ ein echtes Kommando ausgefuehrt, weder `hermes send` noch ein Cron-Job."""
 import ast
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -99,7 +100,8 @@ def test_auftrag_wird_als_einmaljob_angelegt(lauf):
     assert str(config.HERMES_PYTHON) in lauf.kommandos[0][0]
 
     args = json.loads(lauf.eingaben[0])
-    assert args["schedule"] == "1m"
+    # Zeitpunkt statt Dauer — Begruendung in test_auftrag_ist_sofort_faellig.
+    assert "T" in args["schedule"], "erwartet einen ISO-Zeitstempel"
     assert args["repeat"] == 1, "Ein Sprachauftrag ist einmalig"
     assert args["deliver"] == "telegram:4242"
     assert args["origin"] == {"platform": "telegram", "chat_id": "4242"}
@@ -214,4 +216,19 @@ def test_rahmen_traegt_den_auftrag():
     text = hermes.PROMPT_RAHMEN.format(transcript="Kauf Milch")
     assert text.rstrip().endswith("Kauf Milch")
     assert "Erkennungsfehler" in text
+
+
+def test_auftrag_ist_sofort_faellig(lauf):
+    """Nicht "1m": Hermes' Ticker laeuft im 60-s-Takt, eine zusaetzliche Minute
+    Faelligkeitsabstand verdoppelte die Wartezeit auf 60-120 s. Ein absoluter
+    Zeitstempel von jetzt macht den Job sofort faellig — es bleibt nur der Takt.
+    """
+    hermes.auftrag_anlegen("Kauf Milch", "123")
+
+    schedule = json.loads(lauf.eingaben[0])["schedule"]
+    assert schedule != "1m"
+    geplant = datetime.fromisoformat(schedule)
+    assert geplant.tzinfo is not None, "ohne Zeitzone haengt der Zeitpunkt an der Serverzeit"
+    abstand = abs((datetime.now(timezone.utc) - geplant).total_seconds())
+    assert abstand < 60, f"Zeitpunkt liegt {abstand:.0f} s daneben"
 

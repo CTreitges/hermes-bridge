@@ -20,7 +20,7 @@ import json
 import re
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
@@ -82,6 +82,12 @@ def resolve_chat_id(configured: str = "") -> str:
     return treffer.group(1)
 
 
+def jetzt_iso() -> str:
+    """Jetzt, mit Zeitzone. Ohne Zeitzone legt Hermes die konfigurierte zugrunde — das
+    ginge hier gut, aber ein eindeutiger Zeitpunkt ist eindeutig besser."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 def dauer_text(duration_ms: int) -> str:
     sekunden = max(0, duration_ms) // 1000
     return f"{sekunden // 60}:{sekunden % 60:02d} min"
@@ -126,7 +132,12 @@ def auftrag_anlegen(transcript: str, chat_id: str) -> str | None:
     args = {
         "_agent_path": str(config.HERMES_AGENT),
         "prompt": PROMPT_RAHMEN.format(transcript=transcript),
-        "schedule": "1m",
+        # Sofort faellig statt "1m". Hermes' parse_duration kennt als kleinste Einheit
+        # Minuten, ein absoluter Zeitstempel geht aber auch — und ein ueberfaelliger
+        # Einmaljob feuert beim naechsten Tick (cron/jobs.py get_due_jobs). Damit faellt
+        # die feste Wartezeit von einer Minute weg; es bleibt nur der 60-s-Takt des
+        # Tickers, also 0-60 s statt 60-120 s.
+        "schedule": jetzt_iso(),
         "repeat": 1,
         "name": "WhisperLoom-Sprachauftrag",
         "deliver": f"telegram:{chat_id}",
