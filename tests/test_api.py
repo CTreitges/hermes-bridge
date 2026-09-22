@@ -11,16 +11,33 @@ KOPF = {"Authorization": f"Bearer {TOKEN}"}
 
 @pytest.fixture
 def aufrufe(monkeypatch):
-    """Zaehlt die Uebergaben an Hermes, statt sie auszufuehren."""
+    """Zaehlt Dokument-Zustellung und Agentenlauf, statt sie auszufuehren.
+
+    `TestClient` fuehrt Hintergrund-Aufgaben nach der Antwort aus — der Agentenlauf
+    landet also mit im Protokoll, obwohl er in der echten Anwendung erst nach dem 202
+    laeuft.
+    """
     protokoll = []
 
-    def falsche_uebergabe(transcript, recorded_at, duration_ms, chat_id):
-        protokoll.append({"transcript": transcript, "chat_id": chat_id, "duration_ms": duration_ms})
-        return "job-1"
+    def falsches_dokument(transcript, recorded_at, duration_ms, chat_id):
+        protokoll.append({"schritt": "dokument", "transcript": transcript, "chat_id": chat_id, "duration_ms": duration_ms})
 
-    monkeypatch.setattr(hermes, "uebergeben", falsche_uebergabe)
+    def falsche_antwort(transcript, chat_id):
+        protokoll.append({"schritt": "agent", "transcript": transcript, "chat_id": chat_id})
+        return "erledigt"
+
+    monkeypatch.setattr(hermes, "dokument_uebergeben", falsches_dokument)
+    monkeypatch.setattr(hermes, "beantworten", falsche_antwort)
     monkeypatch.setattr(hermes, "resolve_chat_id", lambda configured="": "4242")
     return protokoll
+
+
+def dokumente(protokoll):
+    return [e for e in protokoll if e["schritt"] == "dokument"]
+
+
+def agentenlaeufe(protokoll):
+    return [e for e in protokoll if e["schritt"] == "agent"]
 
 
 @pytest.fixture
@@ -83,10 +100,12 @@ def test_gueltiger_auftrag_202_und_genau_eine_uebergabe(client, aufrufe):
     daten = antwort.json()
     assert daten["status"] == "accepted"
     assert daten["request_id"] == "r1"
-    assert daten["job_id"] == "job-1"
-    assert len(aufrufe) == 1
-    assert aufrufe[0]["transcript"] == "Erinnere mich an den Zahnarzt"
-    assert aufrufe[0]["chat_id"] == "4242"
+    assert len(dokumente(aufrufe)) == 1
+    assert len(agentenlaeufe(aufrufe)) == 1
+    assert dokumente(aufrufe)[0]["transcript"] == "Erinnere mich an den Zahnarzt"
+    assert dokumente(aufrufe)[0]["chat_id"] == "4242"
+    # Das Dokument geht VOR dem Agentenlauf raus.
+    assert aufrufe[0]["schritt"] == "dokument"
 
 
 # --- Idempotenz -----------------------------------------------------------
@@ -97,13 +116,15 @@ def test_gleiche_request_id_fuehrt_nur_einmal_aus(client, aufrufe):
     assert erste.status_code == 202
     assert zweite.status_code == 202
     assert zweite.json()["duplicate"] is True
-    assert len(aufrufe) == 1, "Der Retry darf nichts erneut ausloesen"
+    assert len(dokumente(aufrufe)) == 1, "Der Retry darf nichts erneut ausloesen"
+    assert len(agentenlaeufe(aufrufe)) == 1, "und schon gar nicht den Agenten zweimal"
 
 
 def test_verschiedene_request_ids_laufen_beide(client, aufrufe):
     client.post("/v1/task", json=auftrag(request_id="a"), headers=KOPF)
     client.post("/v1/task", json=auftrag(request_id="b"), headers=KOPF)
-    assert len(aufrufe) == 2
+    assert len(dokumente(aufrufe)) == 2
+    assert len(agentenlaeufe(aufrufe)) == 2
 
 
 # --- Hermes faellt aus ----------------------------------------------------
@@ -113,7 +134,7 @@ def test_hermes_fehler_503_und_keine_halbe_zustellung(client, monkeypatch):
         raise hermes.HermesError("Gateway antwortet nicht")
 
     monkeypatch.setattr(hermes, "resolve_chat_id", lambda configured="": "4242")
-    monkeypatch.setattr(hermes, "uebergeben", kaputt)
+    monkeypatch.setattr(hermes, "dokument_uebergeben", kaputt)
 
     antwort = client.post("/v1/task", json=auftrag(request_id="kaputt"), headers=KOPF)
     assert antwort.status_code == 503
@@ -124,15 +145,16 @@ def test_nach_einem_fehler_darf_die_app_es_erneut_versuchen(client, monkeypatch,
     def kaputt(**_):
         raise hermes.HermesError("kurz weg")
 
-    monkeypatch.setattr(hermes, "uebergeben", kaputt)
+    monkeypatch.setattr(hermes, "dokument_uebergeben", kaputt)
     assert client.post("/v1/task", json=auftrag(request_id="retry"), headers=KOPF).status_code == 503
 
     # Jetzt geht es wieder — dieselbe Id muss durchkommen, sonst waere der Auftrag
     # eine Stunde lang gesperrt, obwohl nichts passiert ist.
-    monkeypatch.setattr(hermes, "uebergeben", lambda **kw: aufrufe.append(kw) or "job-2")
+    monkeypatch.setattr(hermes, "dokument_uebergeben",
+                        lambda **kw: aufrufe.append({"schritt": "dokument", **kw}))
     zweite = client.post("/v1/task", json=auftrag(request_id="retry"), headers=KOPF)
     assert zweite.status_code == 202
-    assert len(aufrufe) == 1
+    assert len(dokumente(aufrufe)) == 1
 
 
 # --- Rate-Limit und Health ------------------------------------------------
@@ -142,7 +164,7 @@ def test_rate_limit_greift(client, aufrufe):
         assert client.post("/v1/task", json=auftrag(request_id=f"n{i}"), headers=KOPF).status_code == 202
     zuviel = client.post("/v1/task", json=auftrag(request_id="n30"), headers=KOPF)
     assert zuviel.status_code == 429
-    assert len(aufrufe) == 30
+    assert len(dokumente(aufrufe)) == 30
 
 
 def test_health_verraet_nichts_geheimes(client):
@@ -151,3 +173,14 @@ def test_health_verraet_nichts_geheimes(client):
     text = antwort.text
     assert antwort.json()["status"] == "ok"
     assert TOKEN not in text and "4242" not in text
+
+
+def test_die_bridge_protokolliert_sichtbar(caplog, client, aufrufe):
+    """Ohne eigene Konfiguration verschluckt uvicorn den Logger — beim Fehlersuchen
+    sah man dann weder, dass ein Auftrag ankam, noch was der Hintergrundlauf tat."""
+    with caplog.at_level("INFO", logger="hermes-bridge"):
+        client.post("/v1/task", json=auftrag(request_id="sichtbar"), headers=KOPF)
+    zeilen = [r.message for r in caplog.records if r.name == "hermes-bridge"]
+    assert any("angenommen" in z for z in zeilen), zeilen
+    assert any("beantwortet" in z for z in zeilen), zeilen
+
