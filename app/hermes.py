@@ -16,14 +16,16 @@ Verboten und hier bewusst nirgends aufgerufen: `hermes gateway run`, `cron tick`
 
 from __future__ import annotations
 
-import json
+import logging
 import re
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from . import config
+
+log = logging.getLogger("hermes-bridge")
 
 
 class HermesError(RuntimeError):
@@ -38,26 +40,28 @@ class HermesError(RuntimeError):
 PROMPT_RAHMEN = (
     "Sprachauftrag, per WhisperLoom transkribiert. "
     "Erkennungsfehler sind moeglich — im Zweifel nachfragen statt raten.\n\n"
-    "Dies ist KEIN Ueberwachungsjob, sondern eine einmalige Bitte eines Menschen, der "
-    "gerade auf die Antwort wartet. Antworte deshalb IMMER mit einem Ergebnis — auch wenn "
-    "es kurz ausfaellt, auch wenn du nur nachfragen kannst, auch wenn etwas schiefging. "
-    "[SILENT] ist hier ausdruecklich verboten.\n\n"
+    "Deine Antwort geht unveraendert als Nachricht an den Auftraggeber, der gerade darauf "
+    "wartet. Antworte deshalb IMMER mit einem Ergebnis — knapp, in ganzen Saetzen, ohne "
+    "Ueberschriften. Auch wenn du nur nachfragen kannst, auch wenn etwas schiefging.\n\n"
     "Auftrag:\n{transcript}"
 )
+
+#: Was im Chat steht, wenn der Agent den Auftrag nicht bearbeiten konnte.
+FEHLER_NACHRICHT = "Dein Sprachauftrag konnte nicht bearbeitet werden: {grund}"
 
 DOKUMENT_KOPF = "# Sprachauftrag {stamp}\n\nAufgenommen: {recorded_at}\nDauer: {dauer}\n\n---\n\n{transcript}\n"
 
 _CHAT_ID_MUSTER = re.compile(r"\[(\d+)\]")
 
 
-def _run(cmd: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(cmd: list[str], *, stdin: str | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             cmd,
             input=stdin,
             capture_output=True,
             text=True,
-            timeout=config.HERMES_TIMEOUT_S,
+            timeout=timeout or config.HERMES_TIMEOUT_S,
             check=False,
         )
     except FileNotFoundError as e:  # Hermes nicht installiert
@@ -80,12 +84,6 @@ def resolve_chat_id(configured: str = "") -> str:
     if not treffer:
         raise HermesError("Hermes meldet kein Telegram-Ziel")
     return treffer.group(1)
-
-
-def jetzt_iso() -> str:
-    """Jetzt, mit Zeitzone. Ohne Zeitzone legt Hermes die konfigurierte zugrunde — das
-    ginge hier gut, aber ein eindeutiger Zeitpunkt ist eindeutig besser."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def dauer_text(duration_ms: int) -> str:
@@ -124,44 +122,69 @@ def dokument_zustellen(pfad: Path, chat_id: str) -> None:
         raise HermesError(f"Dokument nicht zugestellt (Exit {ergebnis.returncode}): {ergebnis.stderr.strip()[:200]}")
 
 
-def auftrag_anlegen(transcript: str, chat_id: str) -> str | None:
-    """Legt den Einmaljob an und liefert dessen Id.
+def agent_fragen(transcript: str) -> str:
+    """Laesst den Agenten den Auftrag SOFORT bearbeiten und liefert seine Antwort.
 
-    Der Job laeuft ueber den Interpreter des Agenten — nur der kennt das `cron`-Modul.
+    Frueher lief das ueber einen Cron-Einmaljob. Der brachte `attach_to_session` mit (die
+    Antwort landete auch in der Chat-Sitzung), kostete aber 60 bis 120 s: Hermes' kleinste
+    Zeiteinheit ist die Minute, und der Ticker laeuft im 60-s-Takt. Der Direktaufruf
+    braucht gemessen rund 11 s.
+
+    `-Q` laesst nur die Antwort auf stdout; die Sitzungs-Id geht nach stderr.
+    Das Transkript steht als EIN argv-Element in der Liste — es wird keine Shell
+    dazwischengeschaltet, also kann daraus kein Kommando werden.
     """
-    args = {
-        "_agent_path": str(config.HERMES_AGENT),
-        "prompt": PROMPT_RAHMEN.format(transcript=transcript),
-        # Sofort faellig statt "1m". Hermes' parse_duration kennt als kleinste Einheit
-        # Minuten, ein absoluter Zeitstempel geht aber auch — und ein ueberfaelliger
-        # Einmaljob feuert beim naechsten Tick (cron/jobs.py get_due_jobs). Damit faellt
-        # die feste Wartezeit von einer Minute weg; es bleibt nur der 60-s-Takt des
-        # Tickers, also 0-60 s statt 60-120 s.
-        "schedule": jetzt_iso(),
-        "repeat": 1,
-        "name": "WhisperLoom-Sprachauftrag",
-        "deliver": f"telegram:{chat_id}",
-        "origin": {"platform": "telegram", "chat_id": chat_id},
-        "attach_to_session": True,
-    }
     ergebnis = _run(
-        [str(config.HERMES_PYTHON), str(Path(__file__).with_name("hermes_job.py"))],
-        stdin=json.dumps(args),
+        [str(config.HERMES_CLI), "chat", "-q", PROMPT_RAHMEN.format(transcript=transcript), "-Q"],
+        timeout=config.AGENT_TIMEOUT_S,
     )
     if ergebnis.returncode != 0:
-        raise HermesError(f"Auftrag nicht angelegt (Exit {ergebnis.returncode}): {ergebnis.stderr.strip()[:200]}")
-    try:
-        return json.loads(ergebnis.stdout).get("id")
-    except json.JSONDecodeError as e:
-        raise HermesError("Hermes hat keine Job-Id geliefert") from e
+        raise HermesError(f"Agent abgebrochen (Exit {ergebnis.returncode}): {ergebnis.stderr.strip()[:200]}")
+    antwort = ergebnis.stdout.strip()
+    if not antwort:
+        raise HermesError("Agent hat nichts geantwortet")
+    return antwort
 
 
-def uebergeben(transcript: str, recorded_at: str, duration_ms: int, chat_id: str) -> str | None:
-    """Beide Schritte. Scheitert der erste, wird der zweite nicht versucht — ein Auftrag
-    ohne sichtbares Transkript waere schlechter nachvollziehbar als gar keiner."""
+def nachricht_zustellen(text: str, chat_id: str) -> None:
+    """Die Antwort als normale Nachricht in den Chat (kein Dokument)."""
+    ergebnis = _run([str(config.HERMES_CLI), "send", "--to", f"telegram:{chat_id}", text])
+    if ergebnis.returncode != 0:
+        raise HermesError(f"Antwort nicht zugestellt (Exit {ergebnis.returncode}): {ergebnis.stderr.strip()[:200]}")
+
+
+def dokument_uebergeben(transcript: str, recorded_at: str, duration_ms: int, chat_id: str) -> None:
+    """Schritt 1: das Transkript als Dokument in den Chat.
+
+    Passiert noch waehrend der HTTP-Anfrage — scheitert es, erfaehrt die App davon (503)
+    und kann es erneut versuchen. Ein Auftrag ohne sichtbares Transkript waere schlechter
+    nachvollziehbar als gar keiner.
+    """
     pfad = dokument_schreiben(transcript, recorded_at, duration_ms)
     try:
         dokument_zustellen(pfad, chat_id)
-        return auftrag_anlegen(transcript, chat_id)
     finally:
         pfad.unlink(missing_ok=True)
+
+
+def beantworten(transcript: str, chat_id: str) -> str:
+    """Schritt 2: Agent laufen lassen und die Antwort zustellen.
+
+    Laeuft NACH der HTTP-Antwort im Hintergrund — der Agent darf Minuten brauchen, das
+    Telefon soll nicht so lange auf ein 202 warten. Geht dabei etwas schief, erfaehrt es
+    der Auftraggeber im Chat: er hat gesprochen und wartet, Schweigen waere die
+    schlechteste Antwort.
+    """
+    try:
+        antwort = agent_fragen(transcript)
+    except HermesError as e:
+        log.warning("Auftrag nicht bearbeitet: %s", e)
+        try:
+            nachricht_zustellen(FEHLER_NACHRICHT.format(grund=e), chat_id)
+        except HermesError as zweiter:
+            log.error("Auch die Fehlermeldung kam nicht durch: %s", zweiter)
+        raise
+    log.info("Agent fertig (%d Zeichen), stelle zu", len(antwort))
+    nachricht_zustellen(antwort, chat_id)
+    log.info("Antwort zugestellt an telegram:%s", chat_id)
+    return antwort

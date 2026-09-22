@@ -13,13 +13,21 @@ import hmac
 import logging
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import config, hermes
 from .idempotency import IdempotencyStore, RateLimiter
 
+# Ohne eigene Konfiguration verschluckt uvicorn alles, was dieser Logger sagt: der
+# Wurzel-Logger hat dort keinen Handler. Unter systemd landet stdout im Journal —
+# genau dort will man beim Fehlersuchen nachsehen. (Genau das hat einmal eine halbe
+# Stunde gekostet: der Hintergrundlauf lief, war aber unsichtbar.)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 log = logging.getLogger("hermes-bridge")
 
 config.load_env()
@@ -66,7 +74,11 @@ def health() -> dict[str, object]:
 
 
 @app.post("/v1/task", status_code=202)
-def task(auftrag: Task, _: Annotated[None, Depends(pruefe_token)] = None) -> JSONResponse:
+def task(
+    auftrag: Task,
+    hintergrund: BackgroundTasks,
+    _: Annotated[None, Depends(pruefe_token)] = None,
+) -> JSONResponse:
     if not auftrag.transcript.strip():
         return fehler(400, "Das Transkript ist leer")
     if not limiter.allow():
@@ -81,10 +93,13 @@ def task(auftrag: Task, _: Annotated[None, Depends(pruefe_token)] = None) -> JSO
             content={"status": "accepted", "request_id": auftrag.request_id, "duplicate": True},
         )
 
+    text = auftrag.transcript.strip()
     try:
         chat_id = hermes.resolve_chat_id(config.settings().chat_id)
-        job_id = hermes.uebergeben(
-            transcript=auftrag.transcript.strip(),
+        # Schritt 1 noch hier: scheitert die Zustellung, soll die App es erfahren und
+        # erneut versuchen koennen.
+        hermes.dokument_uebergeben(
+            transcript=text,
             recorded_at=auftrag.recorded_at,
             duration_ms=auftrag.duration_ms,
             chat_id=chat_id,
@@ -96,8 +111,25 @@ def task(auftrag: Task, _: Annotated[None, Depends(pruefe_token)] = None) -> JSO
         log.warning("Auftrag %s nicht uebergeben: %s", auftrag.request_id, e)
         return fehler(503, f"Hermes nicht erreichbar: {e}")
 
-    log.info("Auftrag %s uebergeben (Job %s)", auftrag.request_id, job_id)
+    # Schritt 2 im Hintergrund: der Agent darf Minuten brauchen, das Telefon soll nicht
+    # so lange auf die Bestaetigung warten. Scheitert er, erfaehrt es der Auftraggeber
+    # im Chat (hermes.beantworten), nicht die App — sie ist da laengst fertig.
+    hintergrund.add_task(_bearbeiten, auftrag.request_id, text, chat_id)
+
+    log.info("Auftrag %s angenommen, Agent laeuft", auftrag.request_id)
     return JSONResponse(
         status_code=202,
-        content={"status": "accepted", "request_id": auftrag.request_id, "job_id": job_id},
+        content={"status": "accepted", "request_id": auftrag.request_id},
     )
+
+
+def _bearbeiten(request_id: str, transcript: str, chat_id: str) -> None:
+    """Der Agentenlauf, nach der HTTP-Antwort."""
+    try:
+        hermes.beantworten(transcript, chat_id)
+        log.info("Auftrag %s beantwortet", request_id)
+    except hermes.HermesError:
+        # beantworten() hat den Auftraggeber schon im Chat informiert und geloggt.
+        # Die Id bleibt belegt: ein Wiederholungsversuch der App wuerde denselben
+        # Auftrag ein zweites Mal durch den Agenten schicken.
+        pass

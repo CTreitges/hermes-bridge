@@ -29,8 +29,12 @@ RATE_LIMIT_PER_MIN = 30
 #: Hoechstlaenge eines Transkripts. Ein Diktat ist kein Buch; alles darueber ist ein Fehler.
 MAX_TRANSCRIPT_CHARS = 20_000
 
-#: Zeitlimit fuer die beiden Hermes-Aufrufe (Dokument zustellen, Auftrag anlegen).
+#: Zeitlimit fuer die kurzen Hermes-Aufrufe (Chat-Id ermitteln, Nachricht zustellen).
 HERMES_TIMEOUT_S = 30
+
+#: Zeitlimit fuer den Agentenlauf selbst. Deutlich groesser: ein Auftrag darf recherchieren,
+#: rechnen und Werkzeuge benutzen. Gemessen liegt ein einfacher Auftrag bei rund 11 s.
+AGENT_TIMEOUT_S = 600
 
 
 @dataclass(frozen=True)
