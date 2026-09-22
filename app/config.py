@@ -32,6 +32,17 @@ MAX_TRANSCRIPT_CHARS = 20_000
 #: Zeitlimit fuer die kurzen Hermes-Aufrufe (Chat-Id ermitteln, Nachricht zustellen).
 HERMES_TIMEOUT_S = 30
 
+#: Verzeichnis, in dem der Agent arbeitet.
+#:
+#: NICHT das Verzeichnis des Dienstes: dort liegt der Quelltext der Bridge, und der Agent
+#: hat Schreibwerkzeuge. Ein Auftrag wie "raeum das mal auf" landete sonst auf dem Dienst,
+#: der ihn gerade ausfuehrt (einmal passiert: read_file + patch auf app/). Das Home ist
+#: das, was ein `hermes chat` von Hand auch als Arbeitsverzeichnis haette.
+#:
+#: Ausdruecklich KEIN Sandkasten — der Agent soll ja etwas ausrichten koennen. Wer ihn
+#: enger fuehren will, setzt AGENT_WORKDIR auf ein eigenes Verzeichnis.
+AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR") or Path.home())
+
 #: Zeitlimit fuer den Agentenlauf selbst. Deutlich groesser: ein Auftrag darf recherchieren,
 #: rechnen und Werkzeuge benutzen. Gemessen liegt ein einfacher Auftrag bei rund 11 s.
 AGENT_TIMEOUT_S = 600
