@@ -120,6 +120,47 @@ def test_das_transkript_ist_ein_einziges_argument(lauf):
     assert len(treffer) == 1, "das Transkript muss genau EIN argv-Element sein"
 
 
+def test_werkzeug_vorschauen_landen_nicht_im_chat(monkeypatch):
+    """`-Q` verspricht "only output the final response" — das patch-Werkzeug haelt sich
+    nicht daran und schreibt seinen Diff nach stdout. Genau so kam er einmal im Chat an.
+    """
+    ausgabe = (
+        "  \u250a review diff\n"
+        "a//tmp/notiz.txt \u2192 b//tmp/notiz.txt\n"
+        "@@ -1,3 +1,3 @@\n zeile eins\n-zeile zwei\n+zeile ZWEI\n zeile drei\n"
+        f"{hermes.MARKE_START}\nErledigt — 'zwei' wurde zu 'ZWEI' geaendert.\n{hermes.MARKE_ENDE}\n"
+    )
+    monkeypatch.setattr(subprocess, "run", FalscherLauf(stdout=ausgabe))
+    assert hermes.agent_fragen("x") == "Erledigt — 'zwei' wurde zu 'ZWEI' geaendert."
+
+
+def test_ohne_marken_kommt_lieber_alles_an_als_nichts(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", FalscherLauf(stdout="  Einfach eine Antwort.  \n"))
+    assert hermes.agent_fragen("x") == "Einfach eine Antwort."
+
+
+def test_der_rahmen_verlangt_die_marken(lauf):
+    hermes.agent_fragen("Kauf Milch")
+    prompt = lauf.kommandos[0][lauf.kommandos[0].index("-q") + 1]
+    assert hermes.MARKE_START in prompt and hermes.MARKE_ENDE in prompt
+
+
+def test_der_agent_arbeitet_nicht_im_verzeichnis_des_dienstes(monkeypatch):
+    """Sonst landet ein Auftrag wie "raeum das mal auf" auf dem Dienst, der ihn gerade
+    ausfuehrt — einmal passiert (read_file + patch auf app/)."""
+    gesehen = {}
+
+    def merken(cmd, **kw):
+        gesehen["cwd"] = kw.get("cwd")
+        return subprocess.CompletedProcess(cmd, 0, "Antwort", "")
+
+    monkeypatch.setattr(subprocess, "run", merken)
+    hermes.agent_fragen("x")
+    dienst = Path(hermes.__file__).parent.parent
+    assert gesehen["cwd"] is not None, "ohne cwd erbt der Agent das Verzeichnis des Dienstes"
+    assert Path(gesehen["cwd"]).resolve() != dienst.resolve()
+
+
 def test_leere_antwort_ist_ein_fehler(monkeypatch):
     """Sonst kaeme beim Auftraggeber eine leere Nachricht an."""
     monkeypatch.setattr(subprocess, "run", FalscherLauf(stdout="   \n"))

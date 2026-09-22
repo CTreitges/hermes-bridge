@@ -37,12 +37,23 @@ class HermesError(RuntimeError):
 #: Der rohe Text geht nicht unveraendert als Prompt raus: Hermes soll wissen, woher er
 #: kommt, und dass Erkennungsfehler moeglich sind — sonst raet er bei einem verhoerten
 #: Wort, statt nachzufragen.
+#: Marken um die eigentliche Antwort.
+#:
+#: `-Q` verspricht "only output the final response" — das stimmt nicht: mindestens das
+#: patch-Werkzeug schreibt eine Diff-Vorschau ("  \u250a review diff", danach der Diff)
+#: direkt nach stdout. Die landete ungefiltert im Chat. Die Marken machen die Antwort
+#: unabhaengig davon auffindbar, egal welches Werkzeug kuenftig noch etwas ausgibt.
+MARKE_START = "<<<ANTWORT>>>"
+MARKE_ENDE = "<<<ENDE>>>"
+
 PROMPT_RAHMEN = (
     "Sprachauftrag, per WhisperLoom transkribiert. "
     "Erkennungsfehler sind moeglich — im Zweifel nachfragen statt raten.\n\n"
-    "Deine Antwort geht unveraendert als Nachricht an den Auftraggeber, der gerade darauf "
-    "wartet. Antworte deshalb IMMER mit einem Ergebnis — knapp, in ganzen Saetzen, ohne "
+    "Deine Antwort geht als Nachricht an den Auftraggeber, der gerade darauf wartet. "
+    "Antworte deshalb IMMER mit einem Ergebnis — knapp, in ganzen Saetzen, ohne "
     "Ueberschriften. Auch wenn du nur nachfragen kannst, auch wenn etwas schiefging.\n\n"
+    "Schreibe deine Antwort zwischen die Marken " + MARKE_START + " und " + MARKE_ENDE + " "
+    "und sonst nichts dazwischen.\n\n"
     "Auftrag:\n{transcript}"
 )
 
@@ -54,7 +65,9 @@ DOKUMENT_KOPF = "# Sprachauftrag {stamp}\n\nAufgenommen: {recorded_at}\nDauer: {
 _CHAT_ID_MUSTER = re.compile(r"\[(\d+)\]")
 
 
-def _run(cmd: list[str], *, stdin: str | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], *, stdin: str | None = None, timeout: int | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             cmd,
@@ -62,6 +75,7 @@ def _run(cmd: list[str], *, stdin: str | None = None, timeout: int | None = None
             capture_output=True,
             text=True,
             timeout=timeout or config.HERMES_TIMEOUT_S,
+            cwd=cwd,
             check=False,
         )
     except FileNotFoundError as e:  # Hermes nicht installiert
@@ -137,13 +151,28 @@ def agent_fragen(transcript: str) -> str:
     ergebnis = _run(
         [str(config.HERMES_CLI), "chat", "-q", PROMPT_RAHMEN.format(transcript=transcript), "-Q"],
         timeout=config.AGENT_TIMEOUT_S,
+        cwd=config.AGENT_WORKDIR,
     )
     if ergebnis.returncode != 0:
         raise HermesError(f"Agent abgebrochen (Exit {ergebnis.returncode}): {ergebnis.stderr.strip()[:200]}")
-    antwort = ergebnis.stdout.strip()
+    antwort = nur_die_antwort(ergebnis.stdout)
     if not antwort:
         raise HermesError("Agent hat nichts geantwortet")
     return antwort
+
+
+def nur_die_antwort(stdout: str) -> str:
+    """Schneidet die Antwort aus der Ausgabe.
+
+    Ohne Marken (der Agent hat sie vergessen) bleibt die ganze Ausgabe — lieber eine
+    Nachricht mit etwas Beiwerk als gar keine.
+    """
+    start = stdout.find(MARKE_START)
+    if start < 0:
+        return stdout.strip()
+    rest = stdout[start + len(MARKE_START):]
+    ende = rest.find(MARKE_ENDE)
+    return (rest if ende < 0 else rest[:ende]).strip()
 
 
 def nachricht_zustellen(text: str, chat_id: str) -> None:
