@@ -36,8 +36,12 @@ class HermesError(RuntimeError):
 #: kommt, und dass Erkennungsfehler moeglich sind — sonst raet er bei einem verhoerten
 #: Wort, statt nachzufragen.
 PROMPT_RAHMEN = (
-    "Sprachauftrag von Christof, per WhisperLoom transkribiert. "
+    "Sprachauftrag, per WhisperLoom transkribiert. "
     "Erkennungsfehler sind moeglich — im Zweifel nachfragen statt raten.\n\n"
+    "Dies ist KEIN Ueberwachungsjob, sondern eine einmalige Bitte eines Menschen, der "
+    "gerade auf die Antwort wartet. Antworte deshalb IMMER mit einem Ergebnis — auch wenn "
+    "es kurz ausfaellt, auch wenn du nur nachfragen kannst, auch wenn etwas schiefging. "
+    "[SILENT] ist hier ausdruecklich verboten.\n\n"
     "Auftrag:\n{transcript}"
 )
 

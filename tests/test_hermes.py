@@ -190,3 +190,28 @@ def test_die_bridge_fasst_das_gateway_nie_an():
     zusammen = " ".join(texte)
     for verboten in ("systemctl", "gateway run", "cron tick", "config.yaml"):
         assert verboten not in zusammen, f"verbotener Zugriff im Code: {verboten}"
+
+
+def test_rahmen_verbietet_schweigen():
+    """Der Cron-Rahmen von Hermes sagt dem Agenten, er solle bei "nichts Neues" mit
+    [SILENT] antworten — eine Konvention fuer Ueberwachungsjobs. Ein Sprachauftrag ist
+    das Gegenteil: jemand wartet auf eine Antwort. Ohne diesen Satz lief der Auftrag
+    durch, und der Scheduler protokollierte "agent returned [SILENT] — skipping
+    delivery"; beim Nutzer kam nichts an.
+    """
+    text = hermes.PROMPT_RAHMEN.format(transcript="Wie spaet ist es?")
+    assert "[SILENT]" in text and "verboten" in text
+    assert "IMMER" in text
+
+
+def test_rahmen_nennt_keinen_namen():
+    """Der Dienst soll fuer jeden brauchbar sein — kein fest verdrahteter Vorname."""
+    text = hermes.PROMPT_RAHMEN.format(transcript="x")
+    assert "Christof" not in text
+
+
+def test_rahmen_traegt_den_auftrag():
+    text = hermes.PROMPT_RAHMEN.format(transcript="Kauf Milch")
+    assert text.rstrip().endswith("Kauf Milch")
+    assert "Erkennungsfehler" in text
+
