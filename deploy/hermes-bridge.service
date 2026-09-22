@@ -1,4 +1,6 @@
 [Unit]
+# Vorlage: /home/chris durch das eigene Home ersetzen, z. B.
+#   sed "s|/home/chris|$HOME|g" deploy/hermes-bridge.service > ~/.config/systemd/user/hermes-bridge.service
 Description=hermes-bridge — Sprachauftraege von WhisperLoom an Hermes (FastAPI/uvicorn)
 After=network.target
 
